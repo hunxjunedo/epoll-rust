@@ -1,120 +1,141 @@
-use std::{fs::File, io::{Read, pipe}, os::{fd::AsRawFd, unix::fs::FileExt}, thread, time::Duration};
+use std::{
+    fs::File,
+    io::{Error, pipe},
+    os::{fd::AsRawFd, unix::fs::FileExt},
+    thread,
+    time::Duration,
+};
 
-use crate::ffi::{__errno_location, EPOLL_CTL_ADD, EPOLL_ONE_SHOT, Event, close, epoll_create, epoll_ctl, epoll_wait, read, write};
+use anyhow::{Result, bail};
+
+use crate::ffi::{
+    EPOLL_CTL_ADD, EPOLL_CTL_MOD, EPOLL_ONE_SHOT, EPOLLIN, Event, epoll_create1, epoll_ctl, epoll_wait, read, write
+};
 
 mod ffi;
-mod poll;
-fn main() {
-    const EPOLLIN : i32 = 0x1;
-    const EPOLLET : i32 = 1 << 31;
+fn main() -> Result<()> {
     unsafe {
-        // 1. Create epoll instance
-        let epoll_fd = epoll_create(200);
-        
-        assert!(epoll_fd >= 0);
+        let epoll_fd = epoll_create1(0);
+        if epoll_fd < 0 {
+            bail!(
+                "couldn't initialize an epoll instance: {}",
+                Error::last_os_error()
+            )
+        }
 
-        // 2. Create a pipe (producer/consumer)
         let (reader, writer) = pipe().unwrap();
         let read_fd = reader.as_raw_fd();
         let write_fd = writer.as_raw_fd();
 
-        // 3. Add the read end to epoll: level-triggered
-        let mut event = Event {
-            events: (EPOLLIN  | EPOLL_ONE_SHOT ) as u32, // Level-triggered
-            epoll_data: 1,
+        let event = Event {
+            events: (EPOLLIN) as u32, //lt be default
+            epoll_data: 23,
         };
-        let ctl_response = epoll_ctl(epoll_fd, 1, read_fd, &mut event);
-        assert!(ctl_response != -1);
 
+        //register interest
+        let ctl_response = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, read_fd, &event);
 
-
-
-        // 4. Spawn thread to wait on the same FD (thundering herd)
-     fn drainage_without_thread_dispatch(read_fd: i32, epoll_fd: i32, i: i32) {   
-        unsafe {    thread::spawn(move || {
-            let mut buf: [u8; 10] = [0; 10];
-           loop{     let mut events: [Event; 2] = [Event { events: 0, epoll_data: 0 }; 2];
-                println!("Thread {i} waiting...");
-                let n = epoll_wait(epoll_fd, events.as_mut_ptr(), 20, 10000);
-                let read_response = read(read_fd, buf.as_mut_ptr(), 10);
-                println!("Thread {i} awoke! Events: {:?}", events);
-                println!("processing the data: {:?}", String::from_utf8(buf.to_vec()))
-                //THIS IS SYNCHRONOUS, WONT WAIT AGAIN UNTIL COMPLETELY DRAINED, WORKS FINE
-            }
-            });}
-        
+        if ctl_response < 0 {
+            bail!("epoll_ctl failed: {}", Error::last_os_error());
         }
 
-      fn drainage_in_a_secondary_thread_dispatched(read_fd: i32, epoll_fd: i32, i: i32) {
-          unsafe {    
-            let drainer_thread_logic = move || {
-                let mut buf : [u8; 10] = [0; 10];
-                let read_response = read(read_fd, buf.as_mut_ptr(), 10);
-                println!("the dispatcher read {read_response} bytes from the pipe: {:?}", String::from_utf8(buf.to_vec()));
-                thread::sleep(Duration::from_secs(20));
-                let mut event = Event {
-                    events: ( EPOLL_ONE_SHOT  | EPOLLIN) as u32,
-                    epoll_data: 1
+        
+        fn drainage_without_thread_dispatch(read_fd: i32, epoll_fd: i32, i: i32) {
+            //does not dispath a new thread just to drain the buffer, 
+            unsafe {
+                thread::spawn(move || {
+                    let mut buf: [u8; 10] = [0; 10];
+                    let mut events: [Event; 20] = [Event::default(); 20];
+                    loop {
+                        println!("Thread {i} waiting...");
+                        let events_count = epoll_wait(epoll_fd, events.as_mut_ptr(), 20, 10000);
+                        if events_count == 0{
+                            panic!("thread {i} woke up because of timeout");
+                        }
+                        if read(read_fd, buf.as_mut_ptr(), 10) < 0 {
+                            panic!("error reading buffer thread {i}: {} ", Error::last_os_error());
+                        };
+
+                        println!("Thread {i} awoke for {events_count} events! Events Buffer: {:?}", events);
+                        println!("processing the data: {:?}", String::from_utf8(buf.to_vec()));
+                        //THIS IS SYNCHRONOUS, WILL ONLY WAIT AGAIN ONCE BUFFER DRAINED
+                        //DISABLE ONESHOT TO GET THE EXPECTED RESULT
+                    }
+                });
+            }
+        }
+
+        fn drainage_in_a_secondary_thread_dispatched(read_fd: i32, epoll_fd: i32, i: i32) {
+            unsafe {
+                let drainer_thread_logic = move || {
+                    let mut buf: [u8; 10] = [0; 10];
+                    let read_response = read(read_fd, buf.as_mut_ptr(), 10);
+                    println!(
+                        "the dispatcher read {read_response} bytes from the pipe: {:?}",
+                        String::from_utf8(buf.to_vec())
+                    );
+                    thread::sleep(Duration::from_secs(20));
+                    let mut event = Event {
+                        events: (EPOLL_ONE_SHOT | EPOLLIN) as u32,
+                        epoll_data: 1,
+                    };
+                    let rearm_response = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, read_fd, &mut event);
+                    println!("{rearm_response}");
+                    //ENABLE ONESHOT FOR THIS
                 };
-                let rearm_response = epoll_ctl(epoll_fd, 3, read_fd, &mut event );
-                println!("{rearm_response}");
-            };
-            
-            thread::spawn(move || {
-           loop{    
-                let mut events: [Event; 2] = [Event { events: 0, epoll_data: 0 }; 2];
-                println!("Thread {i} waiting...");
-                let n = epoll_wait(epoll_fd, events.as_mut_ptr(), 20, 10000);
-                println!("Thread {i} awoke! Events: {:?}", n);
-                if n != 0 {
-                    thread::spawn(drainer_thread_logic);
-                     println!("thread {i}: just spawned a drainer thread, waiting again");
-                }
-                //THIS WONT ALLOW NEW NOTIFICATIONS UNTIL EXPLICITLY ENABLED BY THE DRAINER THREAD
-             
+
+                thread::spawn(move || {
+                    loop {
+                        let mut events: [Event; 2] = [Event {
+                            events: 0,
+                            epoll_data: 0,
+                        }; 2];
+                        println!("Thread {i} waiting...");
+                        let n = epoll_wait(epoll_fd, events.as_mut_ptr(), 20, 10000);
+                        println!("Thread {i} awoke! Events: {:?}", n);
+                        if n != 0 {
+                            thread::spawn(drainer_thread_logic);
+                            println!("thread {i}: just spawned a drainer thread, waiting again");
+                        }
+                        //THIS WONT ALLOW NEW NOTIFICATIONS UNTIL EXPLICITLY ENABLED BY THE DRAINER THREAD
+                    }
+                });
             }
-            });}
-      }  
+        }
 
-
-      fn no_drainage(read_fd: i32, epoll_fd: i32, i: i32){
-          unsafe {    thread::spawn(move || {
-           loop{     let mut events: [Event; 2] = [Event { events: 0, epoll_data: 0 }; 2];
-                println!("Thread {i} waiting...");
-                let n = epoll_wait(epoll_fd, events.as_mut_ptr(), 20, 10000);
-                println!("Thread {i} awoke! Events: {:?}", n);
-                //NOTHING DRAINED, SO IT WILL KEEP WAKING UP UNLESS ONESHOT ENABLED. WILL ONLY WAKE IF TIMEOUT, OR RESUBSCRIBED BY MOD
+        fn no_drainage(read_fd: i32, epoll_fd: i32, i: i32) {
+            unsafe {
+                thread::spawn(move || {
+                    loop {
+                        let mut events: [Event; 2] = [Event {
+                            events: 0,
+                            epoll_data: 0,
+                        }; 2];
+                        println!("Thread {i} waiting...");
+                        let n = epoll_wait(epoll_fd, events.as_mut_ptr(), 20, 10000);
+                        println!("Thread {i} awoke! Events: {:?}", n);
+                        //NOTHING DRAINED, SO IT WILL KEEP WAKING UP UNLESS ONESHOT ENABLED. WILL ONLY WAKE IF TIMEOUT, OR RESUBSCRIBED BY MOD
+                    }
+                });
             }
-            });}
-      }
-       
-       
-        drainage_in_a_secondary_thread_dispatched(read_fd, epoll_fd, 1);
-        drainage_in_a_secondary_thread_dispatched(read_fd, epoll_fd, 2);
-        
+        }
 
-        // 5. Give threads a moment to block
-        thread::sleep(Duration::from_secs(1));
+        drainage_without_thread_dispatch(read_fd, epoll_fd, 1);
+        drainage_without_thread_dispatch(read_fd, epoll_fd, 2);
 
-        // 6. Write some data into the pipe
-        let mut file = File::open("/home/hunx/epoll-rust/lorem.txt").unwrap();
-        let mut buf = [0u8; 10];
+
+        let file = File::open("/home/hunx/epoll-rust/lorem.txt")?;
+        let mut buf = [0u8; 10]; //10 byte buffer
         let mut offset = 0;
-        
-        loop{
+
+        loop {
             file.read_exact_at(&mut buf, offset).unwrap();
             write(write_fd, buf.as_ptr() as *const _, buf.len());
             println!("wrote {:?}", String::from_utf8(buf.to_vec()));
-             thread::sleep(Duration::from_secs(5));
-             offset += 10;
+            thread::sleep(Duration::from_secs(5));
+            offset += 10;
         }
 
-
-
-        // Clean up
-        close(read_fd);
-        close(write_fd);
-        close(epoll_fd);
+        
     }
 }
-

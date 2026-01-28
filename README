@@ -1,0 +1,21 @@
+# epoll-rust
+
+WARNING: This repository is highly experimental. Examples, and interfaces here are for exploration and learning only — do not use in production.
+
+epoll-rust is a small collection of experiments and examples demonstrating low-level epoll-based I/O patterns in Rust. The code shows how to create and use epoll instances, register file descriptors, and perform edge/level-triggered waits. The project explores safe and unsafe Rust boundaries, minimal wrappers over libc/nix, and simple event loops for learning purposes.
+
+Important notes
+- Linux only (epoll is a Linux-specific kernel API).
+- Experimental: interfaces and safety guarantees are not finalized.
+- Expect breaking changes and incomplete error handling.
+- You should be familiar with non-blocking sockets/FDs and Rust's ownership/unsafe rules before digging in.
+
+Quick start
+1. Install Rust (stable channel).
+2. Build:
+    ```
+    cargo build
+    ```
+
+
+Minimal conceptual example
