@@ -35,5 +35,5 @@ Quick start
 1. Install Rust (stable channel).
 2. Run:
     ```
-    cargo eun
+    cargo run
     ```
