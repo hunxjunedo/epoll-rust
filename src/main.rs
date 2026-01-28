@@ -7,10 +7,9 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use libc::{EPOLL_CTL_ADD, EPOLL_CTL_MOD, EPOLLIN, EPOLLONESHOT};
 
-use crate::ffi::{
-    EPOLL_CTL_ADD, EPOLL_CTL_MOD, EPOLL_ONE_SHOT, EPOLLIN, Event, epoll_create1, epoll_ctl, epoll_wait, read, write
-};
+use crate::ffi::{Event, epoll_create1, epoll_ctl, epoll_wait, read, write};
 
 mod ffi;
 fn main() -> Result<()> {
@@ -39,9 +38,8 @@ fn main() -> Result<()> {
             bail!("epoll_ctl failed: {}", Error::last_os_error());
         }
 
-        
         fn drainage_without_thread_dispatch(read_fd: i32, epoll_fd: i32, i: i32) {
-            //does not dispath a new thread just to drain the buffer, 
+            //does not dispath a new thread just to drain the buffer,
             unsafe {
                 thread::spawn(move || {
                     let mut buf: [u8; 10] = [0; 10];
@@ -49,14 +47,20 @@ fn main() -> Result<()> {
                     loop {
                         println!("Thread {i} waiting...");
                         let events_count = epoll_wait(epoll_fd, events.as_mut_ptr(), 20, 10000);
-                        if events_count == 0{
+                        if events_count == 0 {
                             panic!("thread {i} woke up because of timeout");
                         }
                         if read(read_fd, buf.as_mut_ptr(), 10) < 0 {
-                            panic!("error reading buffer thread {i}: {} ", Error::last_os_error());
+                            panic!(
+                                "error reading buffer thread {i}: {} ",
+                                Error::last_os_error()
+                            );
                         };
 
-                        println!("Thread {i} awoke for {events_count} events! Events Buffer: {:?}", events);
+                        println!(
+                            "Thread {i} awoke for {events_count} events! Events Buffer: {:?}",
+                            events
+                        );
                         println!("processing the data: {:?}", String::from_utf8(buf.to_vec()));
                         //THIS IS SYNCHRONOUS, WILL ONLY WAIT AGAIN ONCE BUFFER DRAINED
                         //DISABLE ONESHOT TO GET THE EXPECTED RESULT
@@ -76,7 +80,7 @@ fn main() -> Result<()> {
                     );
                     thread::sleep(Duration::from_secs(20));
                     let mut event = Event {
-                        events: (EPOLL_ONE_SHOT | EPOLLIN) as u32,
+                        events: (EPOLLONESHOT | EPOLLIN) as u32,
                         epoll_data: 1,
                     };
                     let rearm_response = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, read_fd, &mut event);
@@ -123,7 +127,6 @@ fn main() -> Result<()> {
         drainage_without_thread_dispatch(read_fd, epoll_fd, 1);
         drainage_without_thread_dispatch(read_fd, epoll_fd, 2);
 
-
         let file = File::open("/home/hunx/epoll-rust/lorem.txt")?;
         let mut buf = [0u8; 10]; //10 byte buffer
         let mut offset = 0;
@@ -135,7 +138,5 @@ fn main() -> Result<()> {
             thread::sleep(Duration::from_secs(5));
             offset += 10;
         }
-
-        
     }
 }
